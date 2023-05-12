@@ -1,0 +1,699 @@
+---
+title: "Data624_Project2"
+author: "Gabriel Santos"
+date: "2023-05-12"
+output:
+  rmdformats::material:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_collapsed: yes
+    toc_float: yes
+  html_notebook: default
+  pdf_document:
+    extra_dependencies:
+    - geometry
+    - multicol
+    - multirow
+  word_document:
+    toc: yes
+    toc_depth: '5'
+theme: lumen
+number_sections: yes
+toc_depth: 3
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, error=FALSE, warning=FALSE, message=FALSE)
+```
+
+
+
+
+# Project 2
+
+This is role playing.  I am your new boss.  I am in charge of production at ABC Beverage and you are a team of data scientists reporting to me.  My leadership has told me that new regulations are requiring us to understand our manufacturing process, the predictive factors and be able to report to them our predictive model of PH.
+Please use the historical data set I am providing.  Build and report the factors in BOTH a technical and non-technical report.  I like to use Word and Excel.  Please provide your non-technical report in a  business friendly readable document and your predictions in an Excel readable format.   The technical report should show clearly the models you tested and how you selected your final approach.
+
+
+## Objetive
+
+The goal of the project is to understand our beverage manufacturing process, predictive factors, and to be able to inform our predictive PH model.
+
+
+
+```{r, warning=FALSE, message=FALSE}
+library(readxl)
+library(tidyverse)
+library(caret)
+library(doParallel)
+library(DataExplorer)
+library(psych)
+library(mice)
+library(MASS)
+library(caret)
+library(AppliedPredictiveModeling)
+library(lars)
+library(pls) 
+library(earth)
+library(xgboost)
+library(Cubist)
+library(randomForest)
+library(DT)
+```
+
+
+
+# Data 
+
+We use the historical dataset, provided in excel and use it to analyze and eventually predict the PH of beverages.
+
+First, download training data from github and read excel for training data. Read excel for testing data and transform Brand.code to factor.
+
+```{r, warning=FALSE, message=FALSE}
+temp.file <- tempfile(fileext = ".xlsx")
+
+download.file(url="https://github.com/DATA624-PredictiveAnalytics-Project2/Project2/blob/main/StudentData.xlsx?raw=true", 
+              destfile = temp.file, 
+              mode = "wb", 
+              quiet = TRUE)
+
+train.df <- read_excel(temp.file, skip=0)
+
+download.file(url="https://github.com/DATA624-PredictiveAnalytics-Project2/Project2/blob/main/StudentEvaluation.xlsx?raw=true", 
+              destfile = temp.file, 
+              mode = "wb", 
+              quiet = TRUE)
+
+test.df <- read_excel(temp.file, skip=0)
+
+train.df$`Brand Code` = as.factor(train.df$`Brand Code`)
+test.df$`Brand Code` = as.factor(test.df$`Brand Code`)
+```
+
+
+
+## Data summary
+
+There are 1 predictor variable 'Brand Code' which is factor, and 32 predictor variables that are numeric. The training dataset has 2,571 observations.
+
+```{r, warning=FALSE, message=FALSE}
+glimpse(train.df)
+```
+
+Analyzing the dataset we can see that some values are missing, it would need an imputation.
+
+```{r, warning=FALSE, message=FALSE}
+describe(train.df) %>% dplyr::select(-vars, -trimmed, -mad, -se)
+```
+
+The 'Filler Speed', 'Temperature', 'MFR', and 'Oxygen Filler' predictors appear highly biased and require a transformation. To be safer, we are going to make a histogram.
+
+
+## Variables Distribution
+
+Let’s create the data distribution graphs, the first is the default distribution and the second is the logarithmic distribution.
+
+```{r, warning=FALSE, message=FALSE, fig.height = 8, fig.width = 10}
+plot_histogram(train.df, geom_histogram_args = list("fill" = "blue"))
+```
+
+Log histograms:
+
+```{r, warning=FALSE, message=FALSE, fig.height = 8, fig.width = 10}
+plot_histogram(train.df, scale_x = "log10", geom_histogram_args = list("fill" = "darkblue"))
+```
+
+
+## Missing Data
+
+Let's review the missing data in the training set:
+
+```{r, warning=FALSE, message=FALSE}
+colSums(is.na(train.df))
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.height = 10, fig.width = 10}
+plot_missing(train.df[-1], geom_label_args = list("size" = 4))
+```
+
+According to the graph, the variable that lacks data the most is the variable 'MFR', 8.25% of the data is missing. For the 'filler speed' variable, 2.22% of the data is missing. The missing data will be treated by imputation. 
+
+
+## Correlation
+
+Let's graph the correlation of the variables:
+
+```{r, warning=FALSE, message=FALSE, fig.height = 7, fig.width = 7}
+forcorr <- train.df[complete.cases(train.df),-1]
+corrplot::corrplot(cor(forcorr), method = 'ellipse', type = 'lower', tl.col = 'blue', tl.cex = 0.7)
+```
+According to the graph we can see the correlation between the variables in the data set. We can see that a few variables are correlated. For data preparation, we will use pairwise predictors that have a correlation greater than 0.9.
+
+
+## Outliers
+
+Let's use the Boxplot plots to check for outliers in the data set. Outliers could affect predictions. Let's handle outliers using imputation.
+
+Generating the Boxplot:
+
+```{r, warning=FALSE, message=FALSE}
+par(mfrow = c(3,3))
+for(i in colnames(train.df[-1])){
+boxplot(train.df[,i], main = names(train.df[i]), col="lightblue", horizontal = T)
+}
+```
+
+
+# Data Preparation
+
+## Imputation
+
+We will use the mice package to perform the imputation of missing data and outliers. Mice package is one of the most used packages, it creates multiple imputations for multivariate missing data. We are going to use 'nearZeroVar' to identify if a variable has no variation and is not useful for prediction. If we find any variable that is not useful for the prediction we will eliminate it.
+
+Training set:
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1800)
+train.df.clean <- mice(data.frame(train.df), method = 'rf', m=2, maxit = 2, print=FALSE)
+train.df.clean <- complete(train.df.clean)
+nzv_preds <- nearZeroVar(train.df.clean)
+train.df.clean <- train.df.clean[,-nzv_preds]
+train.df.clean
+```
+
+
+Testing set:
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1801)
+test.df.clean <- mice(data.frame(test.df), method = 'rf', m=2, maxit = 2, print=FALSE)
+test.df.clean <- complete(test.df.clean)
+test.df.clean
+```
+
+
+
+
+## Create Dummy Variables
+
+Let's use the 'dummyVars' function to create a full set of dummy variables, because the 'Brandcode' variable is a categorical variable that has 4 classes.
+
+Training set:
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1802)
+dum.brandcode <- dummyVars(PH ~ Brand.Code, data = train.df.clean)
+dum.train.predict <- predict(dum.brandcode, train.df.clean)
+train.df.clean <- cbind(dum.train.predict, train.df.clean) %>% dplyr::select(-Brand.Code)
+```
+
+Testing set:
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1803)
+dum.brandcode <- dummyVars( ~ Brand.Code, data = test.df.clean)
+dum.test.predict <- predict(dum.brandcode, test.df.clean)
+test.df.clean <- cbind(dum.test.predict, test.df.clean) %>% dplyr::select(-Brand.Code)
+```
+
+
+
+## Correlation
+
+We will use the pairwise predictors that have a correlation greater than 0.9.
+
+
+```{r, warning=FALSE, message=FALSE}
+highCorr <- findCorrelation(cor(train.df.clean), 0.90)
+train.df.clean <- train.df.clean[, -highCorr]
+```
+
+
+## Transformation
+
+Let's use caret 'preprocess' method using transformation as 'YeoJohnson' which applies Yeo-Johnson transformation, like a BoxCox, and takes negative values into account.
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1804)
+preproc_traindf <- preProcess(train.df.clean, method = "YeoJohnson")
+train.df.clean <- predict(preproc_traindf, train.df.clean)
+```
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1805)
+preproc_testdf <- preProcess(test.df.clean, method = "YeoJohnson")
+test.df.clean <- predict(preproc_testdf, test.df.clean)
+```
+
+
+
+## Training and Test Partition
+
+Let's partition the training dataset, for training and validation using 'createDataPartition' method from 'caret' package. We will use 75% of the data for training and 25% for validation.
+
+Training/validation partition for independent variables and training/validation partition for dependent variable PH
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1806)
+partition <- createDataPartition(train.df.clean$PH, p=0.75, list = FALSE)
+X.train <- train.df.clean[partition, ] %>% dplyr::select(-PH)
+X.test <- train.df.clean[-partition, ] %>% dplyr::select(-PH)
+y.train <- train.df.clean$PH[partition]
+y.test <- train.df.clean$PH[-partition]
+```
+
+
+
+# Build Models
+
+
+## Linear Regression
+
+
+### Simple Linear Regression
+
+Let's use Simple Linear Regression model, it will include all the predictor variables in training dataset.
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1807)
+lm_model <- lm(y.train ~ ., data = X.train)
+summary(lm_model)
+```
+
+We can see that Simple Linear Regression model only covers 38% of variability of data. 
+
+
+### Tune PLS model 
+
+PLS model reduces the predictors to a smaller set of uncorrelated components and then performs least squares regression on these components, instead of on the original data. PLS finds linear combinations of the predictors called components. 
+
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1808)
+pls_model <- train(x=X.train,
+                 y=y.train,
+                 method="pls",
+                 metric="Rsquared",
+                 tuneLength=10, 
+                 trControl=trainControl(method = "cv")
+                 )
+pls_model
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+pls_model$bestTune
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+plot(pls_model, col= "blue")
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+pls_model$results %>% 
+  filter(ncomp == pls_model$bestTune$ncomp) %>% 
+  dplyr::select(ncomp,RMSE,Rsquared)
+```
+
+```{r, warning=FALSE, message=FALSE}
+data.frame(Rsquared=pls_model[["results"]][["Rsquared"]][as.numeric(rownames(pls_model$bestTune))],
+           RMSE=pls_model[["results"]][["RMSE"]][as.numeric(rownames(pls_model$bestTune))])
+```
+The final value used for the model was ncomp = 10 which corresponds to best tune model. We see that R2 is 0.327 but it produces small RMSE.
+
+
+## Non Linear Regression
+
+### MARS
+
+Let's use MARS. MARS provide a convenient approach to capture the nonlinear relationships in the data by assessing cutpoints similar to step functions. 
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1809)
+marsGrid <- expand.grid(.degree=1:2, .nprune=2:30)
+mars_model <- train(x=X.train, 
+                    y=y.train,
+                    method = "earth",
+                    tuneGrid = marsGrid,
+                    trControl = trainControl(method = "cv"))
+```
+
+Final parameters:
+
+```{r, warning=FALSE, message=FALSE}
+mars_model$bestTune
+```
+
+```{r, warning=FALSE, message=FALSE}
+plot(mars_model)
+```
+
+```{r, warning=FALSE, message=FALSE}
+summary(mars_model$finalModel)
+```
+
+```{r, warning=FALSE, message=FALSE}
+data.frame(Rsquared=mars_model[["results"]][["Rsquared"]][as.numeric(rownames(mars_model$bestTune))],
+           RMSE=mars_model[["results"]][["RMSE"]][as.numeric(rownames(mars_model$bestTune))])
+```
+RMSE was used to select the optimal model using the smallest value. 
+The final values used for the model were nprune = 26 and degree = 1  which corresponds to best tune model. We see that R2 is 0.45 but it also produces small RMSE.
+
+
+
+### SVM
+
+Let's use SVM (Support Vector Machines). Using these support vectors, we do maximize the margin of the classifier.
+
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1810)
+svm_model <- train(x=X.train, 
+                   y=y.train,
+                   method = "svmRadial",
+                   tuneLength = 10,
+                   trControl = trainControl(method = "cv"))
+svm_model
+```
+
+```{r, warning=FALSE, message=FALSE}
+summary(svm_model$finalModel)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+plot(svm_model, col ="blue")
+```
+
+```{r, warning=FALSE, message=FALSE}
+data.frame(Rsquared=svm_model[["results"]][["Rsquared"]][as.numeric(rownames(svm_model$bestTune))],
+           RMSE=svm_model[["results"]][["RMSE"]][as.numeric(rownames(svm_model$bestTune))])
+```
+
+
+RMSE was used to select the optimal model using the smallest value. 
+The final values R2 value which is 0.49 but it also produces small RMSE.
+
+
+## Trees
+
+### Single Tree
+
+Let's use Regression trees. The regression trees partition a data set into smaller groups and then fit a simple model for each subgroup.
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1811)
+st_model <- train(x=X.train,
+                  y=y.train,
+                  method = "rpart",
+                  tuneLength = 10,
+                  trControl = trainControl(method = "cv"))
+st_model
+```
+
+```{r, warning=FALSE, message=FALSE}
+st_model$bestTune
+```
+
+
+
+```{r, warning=FALSE, message=FALSE}
+plot(st_model, col = "blue")
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+data.frame(Rsquared=st_model[["results"]][["Rsquared"]][as.numeric(rownames(st_model$bestTune))],
+           RMSE=st_model[["results"]][["RMSE"]][as.numeric(rownames(st_model$bestTune))])
+```
+
+
+RMSE was used to select the optimal model using the smallest value. 
+The final value used for the model was cp = 0.01158064.  We see R2 value is 0.438 and RMSE as 0.13. 
+
+
+
+### Boosted Tree
+
+Boosting algorithm seeks to improve the prediction power by training a sequence of weak models where each of them compensates the weaknesses of its predecessors.
+
+Boosting regression trees via stochastic gradient boosting machines:
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1812)
+
+gbmGrid <- expand.grid(interaction.depth = c(5,10), 
+                       n.trees = seq(100, 500, by = 100), 
+                       shrinkage = 0.1,
+                       n.minobsinnode = c(5,10))
+gbm_model <- train(x=X.train,
+                   y=y.train,
+                   method = "gbm",
+                   tuneGrid = gbmGrid, 
+                   trControl = trainControl(method = "cv"),
+                   verbose = FALSE)
+gbm_model
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+gbm_model$bestTune
+```
+
+```{r, warning=FALSE, message=FALSE}
+plot(gbm_model)
+```
+
+```{r, warning=FALSE, message=FALSE}
+data.frame(Rsquared=gbm_model[["results"]][["Rsquared"]][as.numeric(rownames(gbm_model$bestTune))],
+           RMSE=gbm_model[["results"]][["RMSE"]][as.numeric(rownames(gbm_model$bestTune))])
+```
+
+
+Tuning parameter 'shrinkage' was held constant at a value of 0.1. 
+RMSE was used to select the optimal model using the smallest value. 
+The final values used for the model were n.trees = 500, interaction.depth is 10, shrinkage is 0.1 and n.minobsinnode is 5. The R2 is 0.6 and RMSE is 0.11 on training data.
+
+
+### Random Forest
+
+Random forest consists of a large number of individual decision trees that work as an ensemble. Each model in the ensemble is used to generate a prediction for a new sample and these predictions are then averaged to give the forest’s prediction. 
+
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1813)
+rf_model <- train(x=X.train,
+                  y=y.train,
+                  method = "rf",
+                  tuneLength = 10,
+                  trControl = trainControl(method = "cv"))
+rf_model
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+rf_model$bestTune
+```
+
+```{r, warning=FALSE, message=FALSE}
+plot(rf_model, col ="blue")
+```
+
+```{r, warning=FALSE, message=FALSE}
+data.frame(Rsquared=rf_model[["results"]][["Rsquared"]][as.numeric(rownames(rf_model$bestTune))],
+           RMSE=rf_model[["results"]][["RMSE"]][as.numeric(rownames(rf_model$bestTune))])
+```
+
+
+RMSE was used to select the optimal model using the smallest value. 
+The final value used for the model was mtry = 26. R2 is 0.66 and RMSE is 0.10. 
+
+Lets see the informative variables found by Random Forest models. we will use 'varImp' method to find these variables. 
+
+```{r, warning=FALSE, message=FALSE}
+varImp(rf_model)
+```
+
+```{r, warning=FALSE, message=FALSE}
+plot(varImp(rf_model), top=10, main="Random Forest")
+```
+
+
+According to the graph, the most informative variable for the 'PH' response variable is 'Mnf.Flow'.
+
+
+### Cubist
+
+Cubist is a rule-based model. A tree is built where the terminal leaves contain linear regression models. These models are based upon the predictors used in previous splits along with intermediate models. 
+
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1814)
+cubist_model <- train(x=X.train,
+                      y=y.train,
+                      method = "cubist",
+                      tuneLength = 10,
+                      trControl = trainControl(method = "cv"))
+cubist_model
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+cubist_model$bestTune
+```
+
+```{r, warning=FALSE, message=FALSE}
+plot(cubist_model)
+```
+
+
+
+```{r, warning=FALSE, message=FALSE}
+data.frame(Rsquared=cubist_model[["results"]][["Rsquared"]][as.numeric(rownames(cubist_model$bestTune))],
+           RMSE=cubist_model[["results"]][["RMSE"]][as.numeric(rownames(cubist_model$bestTune))])
+```
+
+
+RMSE was used to select the optimal model using the smallest value. 
+The best tune  for the cubist model which resulted in the smallest root mean squared error was  with 20 committees. R2 is 0.6 and RMSE is 0.109.
+
+
+### XGB Tree
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1815) 
+xgb_trcontrol <- trainControl(
+  method = "cv",
+  number = 5,  
+  allowParallel = TRUE,
+  verboseIter = FALSE,
+  returnData = FALSE
+)
+xgbGrid <- expand.grid(nrounds = c(50,100), 
+                       max_depth = c(10, 15, 20, 25),
+                       colsample_bytree = seq(0.5, 0.9, length.out = 5),
+                       eta = 0.1,
+                       gamma=0,
+                       min_child_weight = 1,
+                       subsample = 1
+                      )
+xgb_model <- train(x=X.train,
+                  y=y.train,
+                  method = "xgbTree",
+                  trControl = xgb_trcontrol,
+                  tuneGrid = xgbGrid)
+xgb_model
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+xgb_model$bestTune
+```
+
+```{r, warning=FALSE, message=FALSE}
+plot(xgb_model)
+```
+
+
+
+```{r, warning=FALSE, message=FALSE}
+data.frame(Rsquared=xgb_model[["results"]][["Rsquared"]][as.numeric(rownames(xgb_model$bestTune))],
+           RMSE=xgb_model[["results"]][["RMSE"]][as.numeric(rownames(xgb_model$bestTune))])
+```
+
+R2 is 0.57 and RMSE is 0.125.
+
+
+# Select Model
+
+Let's consider three parameters to select the best model to make the prediction:
+
+R2, RMSE (Root Mean Squared Error), and MAE (Mean Absolute Error).
+
+Let's compare the previous values of the models made:
+
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1816)
+summary(resamples(list(PLS=pls_model, MARS=mars_model, SVM=svm_model, RandFrst=rf_model,  Cubist=cubist_model, SingTree=st_model,Boosting=gbm_model)))
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+bwplot(resamples(list(PLS=pls_model, MARS=mars_model, SVM=svm_model, RandFrst=rf_model,  Cubist=cubist_model, SingTree=st_model, Boosting=gbm_model)), main = "Models Comparison (MAE, RMSE, R2)")
+```
+
+
+
+
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(1817)
+pls_pred <- predict(pls_model, newdata = X.test)
+mars_pred <- predict(mars_model, newdata = X.test)
+svm_pred <- predict(svm_model, newdata = X.test)
+rf_pred <- predict(rf_model, newdata = X.test)
+cubist_pred <- predict(cubist_model, newdata = X.test)
+st_pred<- predict(st_model, newdata = X.test)
+gbm_pred <- predict(gbm_model, newdata = X.test)
+data.frame(rbind(PLS=postResample(pred=pls_pred,obs = y.test),
+                 MARS=postResample(pred=mars_pred,obs = y.test),
+                 SVM=postResample(pred=svm_pred,obs = y.test),
+                 SingTree=postResample(pred=st_pred,obs = y.test),
+                 RandFrst=postResample(pred=rf_pred,obs = y.test),
+                 Boosting=postResample(pred=gbm_pred,obs = y.test),
+                 Cubist=postResample(pred=cubist_pred,obs = y.test)))
+```
+
+
+Comparing all the models, we can see that the best model is 'Random Forest', according to the three chosen parameters.
+
+
+# Prediction
+
+Let's use the most optimal model, which is the Random Forest model, to predict the PH values of the evaluation data set. Then we'll write it to csv.
+
+
+Remove PH from evaluation data for predict final PH values:
+ 
+```{r, warning=FALSE, message=FALSE}
+set.seed(1818)
+test.df.clean <- test.df.clean %>% dplyr::select(-PH)
+test.df.clean$PH <- predict(rf_model, newdata = test.df.clean)
+```
+
+PH predictions for evaluation datase:
+
+```{r, warning=FALSE, message=FALSE}
+test.df.clean$PH %>% tibble::enframe(name = NULL) %>% datatable()
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+plot_histogram(test.df.clean$PH, geom_histogram_args = list("fill" = "darkblue")) 
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+write.csv(test.df.clean$PH, "Predictions_PH.csv")
+```
+
+
+# Conclusion
+
+We analyzed the data provided to us, first to determine missing data and outliers. We also perform a correlation between the variables. Then we're going to modify outliers and missing values, create multiple imputations for multivariate missing data. We split the data into 75% and 25% for training and validation, respectively.
+
+We use several models using linear regression, nonlinear regression and Trees model, to find the best model to make the predictions. 
+
+The optimal model established was Random Forest to predict PH values for the evaluation data, according to the chosen parameters of R2, RMSE and MAE.
+
+According to the forecast, the predicted values are between 8 and 9, PH between 8 and 9.
+
+We can say that the manufactured drink is alkaline. ABC Beverage Company mainly produces alkaline beverages such as tea, flavored waters, fruit juices.
+
+
